@@ -1,3 +1,4 @@
 comv
 
 if $F1 equal sum $F2
+sum $F2

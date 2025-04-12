@@ -4,10 +4,12 @@
 #include <fstream>
 #include <vector>
 #include <string>
+#include <ranges>
 
 #include "Matrix.hpp"
 
 #include "seal/seal.h"
+#include "operations.hpp"
 
 static std::vector<std::string> tokenize(std::ifstream &file) noexcept
 {
@@ -43,20 +45,6 @@ static std::vector<std::string> tokenize(std::ifstream &file) noexcept
 
     return returned;
 }
-
-bool functionIf(std::string_view str1, std::string_view str2) noexcept
-{
-    return str1 == str2;
-}
-
-template <typename T>
-T functionAdd(T elem1, T elem2) noexcept
-{
-    return elem1 + elem2;
-}
-
-// Statements = ori au conditie si actiune
-//              ori au doar actiune
 
 sas::Matrix<std::string> getFileValues(std::ifstream &file) noexcept
 {
@@ -99,11 +87,6 @@ std::vector<size_t> indiciesToNotEncrypt(const std::vector<std::string> &tokens)
     }
 
     return result;
-}
-
-bool equals(std::string_view s1, std::string_view s2) noexcept
-{
-    return s1 == s2;
 }
 
 std::tuple<sas::Matrix<seal::Plaintext>, sas::Matrix<seal::Ciphertext>> getParameters(const std::vector<size_t> &publicIndicies, const sas::Matrix<std::string> &valuesFile, const seal::Encryptor &encryptor, const seal::Decryptor &dec) noexcept
@@ -159,21 +142,8 @@ struct File
     sas::Matrix<seal::Ciphertext> encrpiptedFields;
 };
 
-enum struct Operations
+std::vector<seal::Ciphertext> handleCondition(const std::vector<File>& files, auto (*predicate)(const seal::Plaintext &p1, const seal::Plaintext &p2)->bool, Operations op, const seal::Evaluator &eval) noexcept
 {
-    ADD,
-    SUB
-};
-
-std::vector<seal::Ciphertext> handleEqual(const File &f1, const File &f2, const std::vector<size_t> &fields, Operations op, const seal::Evaluator &eval) noexcept
-{
-    // ELEM1     ELEM3
-    // ELEM2     ELEM4
-
-    // ELEM1 ELEM2    |   ELEM5   ELEM6
-    // ELEM3 ELEM4    |   ELEM7   ELEM8
-    // ELEM9 ELEM10
-
     size_t sizeF1Rows = f1.publicFields.getRows();
     size_t sizeF2Rows = f2.publicFields.getRows();
     size_t sizeF1Cols = f1.publicFields.getCols();
@@ -187,7 +157,7 @@ std::vector<seal::Ciphertext> handleEqual(const File &f1, const File &f2, const 
         {
             for (size_t k = 0; k < sizeF2Rows; ++k)
             {
-                if (f1.publicFields(i, j) == f2.publicFields(k, j))
+                if (predicate(f1.publicFields(i, j), f2.publicFields(k, j)))
                 {
                     switch (op)
                     {
@@ -196,8 +166,14 @@ std::vector<seal::Ciphertext> handleEqual(const File &f1, const File &f2, const 
                         results.push_back(result);
                         break;
 
-                    default:
+                    case Operations::SUB:
+                        eval.sub(f1.encrpiptedFields(i, j), f2.encrpiptedFields(k, j), result);
+                        results.push_back(result);
                         break;
+
+                    default:
+                        std::cerr << "Unreachable, how did we get here??\n";
+                        exit(EXIT_FAILURE);
                     }
                 }
             }
@@ -207,25 +183,72 @@ std::vector<seal::Ciphertext> handleEqual(const File &f1, const File &f2, const 
     return results;
 }
 
-// This function assumes
-// The script is well formated
-// TODO: add script formating checking
-std::vector<seal::Ciphertext> performOperations(const std::vector<std::string> &tokens, const File &f1, const File &f2, const std::vector<size_t> &publicFields, const seal::Evaluator &eval) noexcept
+seal::Ciphertext handleOperation(const File &f1, const File &f2, Operations op, const seal::Evaluator &eval, seal::Decryptor &dec) noexcept
 {
-    size_t size = tokens.size();
-    for (size_t i = 0; i < size; ++i)
+    seal::Ciphertext result = f1.encrpiptedFields(0);
+
+    // Skip first elem
+    for (const auto &elem : f1.encrpiptedFields | std::ranges::views::drop(1))
     {
-        // if field equal sum field
-        if (tokens[i] == "if")
+        switch (op)
         {
-            if (tokens[i + 2] == "equal")
-            {
-                return handleEqual(f1, f2, publicFields, Operations::ADD, eval);
-            }
+        case Operations::ADD:
+
+            eval.add_inplace(result, elem);
+            break;
+        case Operations::SUB:
+            eval.sub_inplace(result, elem);
+
+        default:
+            std::cerr << "Unreachable, how did we get here??\n";
+            exit(EXIT_FAILURE);
         }
     }
 
-    return {};
+    for (const auto &elem : f2.encrpiptedFields)
+    {
+        switch (op)
+        {
+        case Operations::ADD:
+
+            eval.add_inplace(result, elem);
+            break;
+
+        default:
+            break;
+        }
+    }
+
+    return result;
+}
+
+// This function assumes
+// The script is well formated
+// TODO: add script formating checking
+std::vector<std::vector<seal::Ciphertext>> performOperations(const std::vector<std::string> &tokens, const std::vector<File> files, const seal::Evaluator &eval, seal::Decryptor &dec) noexcept
+{
+    size_t size = tokens.size();
+
+    // Supports multiple lines and operations
+    std::vector<std::vector<seal::Ciphertext>> results;
+
+    for (size_t i = 0; i < size; ++i)
+    {
+        if (tokens[i] == "if")
+        {
+            results.emplace_back(handleCondition(files, mappingElems.at(tokens[i + 2]), operationMapping.at(tokens[i + 3]), eval));
+            i = i + 4;
+        }
+        else
+        {
+            std::vector<seal::Ciphertext> vecTrick;
+            vecTrick.emplace_back(handleOperation(f1, f2, operationMapping.at(tokens[i]), eval, dec));
+            results.emplace_back(vecTrick);
+            i = i + 1;
+        }
+    }
+
+    return results;
 }
 
 int main(int argc, const char **argv)
@@ -293,42 +316,20 @@ int main(int argc, const char **argv)
     const auto &[publicFile1, encFile1] = getParameters(publicFields, valuesFile1, encryptor, decryptor);
     const auto &[publicFile2, encFile2] = getParameters(publicFields, valuesFile2, encryptor, decryptor);
 
-    // std::print("Size = {}, {}", encFile1.getRows(), encFile1.getCols());
-
-    // std::ifstream f("test");
-
-    // std::string line;
-    // std::getline(f, line);
-
-    // seal::Ciphertext cf, elem1, elem2;
-    // seal::Plaintext pt, elem1p(line), elem2p("20");
-
-    // encryptor.encrypt(elem1p, elem1);
-    // encryptor.encrypt(elem2p, elem2);
-
-    // evaluator.add(elem1, elem2, cf);
-
-    // decryptor.decrypt(cf, pt);
-
-    // std::print("Sum = {}", pt.to_string());
-
-    // std::print("Public fields size = {}\n", publicFields.size());
-    // for (const auto elem : publicFields)
-    // {
-    // std::print("Elems = {} ", elem);
-    // }
-    // std::print("\n");
-
     File f1{publicFile1, encFile1};
     File f2{publicFile2, encFile2};
 
-    std::vector<seal::Ciphertext> results = performOperations(elems, f1, f2, publicFields, evaluator);
+    const auto &results = performOperations(elems, f1, f2, evaluator, decryptor);
 
-    for (const auto &result : results)
+    for (const auto &resultVec : results)
     {
-        seal::Plaintext plainResult;
-        decryptor.decrypt(result, plainResult);
+        for (const auto &result : resultVec)
+        {
 
-        std::print("Sum of salaries {}", plainResult.to_string());
+            seal::Plaintext plainResult;
+            decryptor.decrypt(result, plainResult);
+
+            std::print("Sum of salaries {}\n", plainResult.to_string());
+        }
     }
 }
