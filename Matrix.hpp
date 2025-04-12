@@ -166,11 +166,11 @@ namespace sas
             return data.data() + data.size();
         }
 
-        const std::vector<T> asVector() const
+        const std::vector<T>& asVector() const
         {
             return data;
         }
-
+        
         Matrix &operator=(const std::initializer_list<std::initializer_list<T>> other)
         {
             size_t newRows = other.size();
