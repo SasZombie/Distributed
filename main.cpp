@@ -142,194 +142,205 @@ struct File
     sas::Matrix<seal::Ciphertext> encrpiptedFields;
 };
 
-std::vector<seal::Ciphertext> handleCondition(const std::vector<File>& files, auto (*predicate)(const seal::Plaintext &p1, const seal::Plaintext &p2)->bool, Operations op, const seal::Evaluator &eval) noexcept
+std::vector<seal::Ciphertext> handleCondition(const std::vector<File> &files, auto (*predicate)(const seal::Plaintext &p1, const seal::Plaintext &p2)->bool, Operations op, const seal::Evaluator &eval) noexcept
 {
-    size_t sizeF1Rows = f1.publicFields.getRows();
-    size_t sizeF2Rows = f2.publicFields.getRows();
-    size_t sizeF1Cols = f1.publicFields.getCols();
-    size_t sizeF2Cols = f2.publicFields.getCols();
+    size_t filesCount = files.size();
     seal::Ciphertext result;
     std::vector<seal::Ciphertext> results;
 
-    for (size_t i = 0; i < sizeF1Rows; ++i)
+    for (const auto &candidate : files[0].publicFields)
     {
-        for (size_t j = 0; j < sizeF1Cols; ++j)
+        bool inAll = true;
+
+        for (size_t i = 1; i < files.size(); ++i)
         {
-            for (size_t k = 0; k < sizeF2Rows; ++k)
+            const std::vector current = files[i].publicFields.asVector();
+
+            bool found = false;
+            for (const auto &val : current)
             {
-                if (predicate(f1.publicFields(i, j), f2.publicFields(k, j)))
+                if (predicate(candidate, val))
                 {
-                    switch (op)
-                    {
-                    case Operations::ADD:
-                        eval.add(f1.encrpiptedFields(i, j), f2.encrpiptedFields(k, j), result);
-                        results.push_back(result);
-                        break;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+            {
+                inAll = false;
+                break;
+            }
+        }
 
-                    case Operations::SUB:
-                        eval.sub(f1.encrpiptedFields(i, j), f2.encrpiptedFields(k, j), result);
-                        results.push_back(result);
-                        break;
+        if (inAll)
+        {
+            switch (op)
+            {
+            case Operations::ADD:
+                eval.add(f1.encrpiptedFields(i, j), f2.encrpiptedFields(k, j), result);
+                results.push_back(result);
+                break;
 
-                    default:
-                        std::cerr << "Unreachable, how did we get here??\n";
-                        exit(EXIT_FAILURE);
-                    }
+            case Operations::SUB:
+                eval.sub(f1.encrpiptedFields(i, j), f2.encrpiptedFields(k, j), result);
+                results.push_back(result);
+                break;
+
+            default:
+                std::cerr << "Unreachable, how did we get here??\n";
+                exit(EXIT_FAILURE);
+            }
+        }
+
+        return results;
+    }
+}
+    seal::Ciphertext handleOperation(const std::vector<File> &files, Operations op, const seal::Evaluator &eval, seal::Decryptor &dec) noexcept
+    {
+        seal::Ciphertext result = files[0].encrpiptedFields(0);
+
+        // Skip first elem
+        for (const auto &f : files)
+        {
+            for (const auto &elem : f.encrpiptedFields)
+            {
+                switch (op)
+                {
+                case Operations::ADD:
+
+                    eval.add_inplace(result, elem);
+                    break;
+                case Operations::SUB:
+                    eval.sub_inplace(result, elem);
+
+                default:
+                    std::cerr << "Unreachable, how did we get here??\n";
+                    exit(EXIT_FAILURE);
                 }
             }
         }
+
+        // Cannot init with 0 so tricks are being done
+        if (op == Operations::ADD)
+        {
+            eval.sub_inplace(result, files[0].encrpiptedFields(0));
+            return result;
+        }
+        eval.add_inplace(result, files[0].encrpiptedFields(0));
+
+        return result;
     }
 
-    return results;
-}
-
-seal::Ciphertext handleOperation(const File &f1, const File &f2, Operations op, const seal::Evaluator &eval, seal::Decryptor &dec) noexcept
-{
-    seal::Ciphertext result = f1.encrpiptedFields(0);
-
-    // Skip first elem
-    for (const auto &elem : f1.encrpiptedFields | std::ranges::views::drop(1))
+    // This function assumes
+    // The script is well formated
+    // TODO: add script formating checking
+    std::vector<std::vector<seal::Ciphertext>> performOperations(const std::vector<std::string> &tokens, const std::vector<File> files, const seal::Evaluator &eval, seal::Decryptor &dec) noexcept
     {
-        switch (op)
+        size_t size = tokens.size();
+
+        // Supports multiple lines and operations
+        std::vector<std::vector<seal::Ciphertext>> results;
+
+        for (size_t i = 0; i < size; ++i)
         {
-        case Operations::ADD:
+            if (tokens[i] == "if")
+            {
+                results.emplace_back(handleCondition(files, mappingElems.at(tokens[i + 2]), operationMapping.at(tokens[i + 3]), eval));
+                i = i + 4;
+            }
+            else
+            {
+                std::vector<seal::Ciphertext> vecTrick;
+                vecTrick.emplace_back(handleOperation(files, operationMapping.at(tokens[i]), eval, dec));
+                results.emplace_back(vecTrick);
+                i = i + 1;
+            }
+        }
 
-            eval.add_inplace(result, elem);
-            break;
-        case Operations::SUB:
-            eval.sub_inplace(result, elem);
+        return results;
+    }
 
-        default:
-            std::cerr << "Unreachable, how did we get here??\n";
-            exit(EXIT_FAILURE);
+    int main(int argc, const char **argv)
+    {
+        if (argc < 4)
+        {
+            std::cerr << "Not enough files provided.\nUsage: File1, File2, ..., File N, algorithm.common";
+            return 1;
+        }
+
+        std::filesystem::path path1 = argv[1];
+        std::filesystem::path path2 = argv[2];
+        std::filesystem::path common = argv[3];
+
+        std::ifstream file1(path1);
+        std::ifstream file2(path2);
+        std::ifstream commonFile(common);
+
+        if (!file1.is_open())
+        {
+            std::cerr << "Cannot open file1\n";
+            return 1;
+        }
+
+        if (!file2.is_open())
+        {
+            std::cerr << "Cannot open file2\n";
+            return 1;
+        }
+
+        if (!commonFile.is_open())
+        {
+            std::cerr << "Cannot open common file\n";
+            return 1;
+        }
+
+        const auto &elems = tokenize(commonFile);
+        const auto &publicFields = indiciesToNotEncrypt(elems);
+
+        seal::EncryptionParameters params(seal::scheme_type::bfv);
+        size_t polyModulusDegree = 8192;
+
+        params.set_poly_modulus_degree(polyModulusDegree);
+        params.set_coeff_modulus(seal::CoeffModulus::BFVDefault(polyModulusDegree));
+        params.set_plain_modulus(seal::PlainModulus::Batching(polyModulusDegree, 20));
+
+        seal::SEALContext context(params);
+        seal::KeyGenerator keyGen(context);
+
+        const auto privateKey = keyGen.secret_key();
+
+        seal::RelinKeys rl;
+        seal::PublicKey pk;
+        keyGen.create_public_key(pk);
+        keyGen.create_relin_keys(rl);
+
+        seal::Encryptor encryptor(context, pk);
+        seal::Decryptor decryptor(context, privateKey);
+        seal::Evaluator evaluator(context);
+        seal::BatchEncoder encoder(context);
+
+        const auto &valuesFile1 = getFileValues(file1);
+        const auto &valuesFile2 = getFileValues(file2);
+
+        const auto &[publicFile1, encFile1] = getParameters(publicFields, valuesFile1, encryptor, decryptor);
+        const auto &[publicFile2, encFile2] = getParameters(publicFields, valuesFile2, encryptor, decryptor);
+
+        File f1{publicFile1, encFile1};
+        File f2{publicFile2, encFile2};
+
+        std::vector files = {f1, f2};
+
+        const auto &results = performOperations(elems, files, evaluator, decryptor);
+
+        for (const auto &resultVec : results)
+        {
+            for (const auto &result : resultVec)
+            {
+
+                seal::Plaintext plainResult;
+                decryptor.decrypt(result, plainResult);
+
+                std::print("Sum of salaries {}\n", plainResult.to_string());
+            }
         }
     }
-
-    for (const auto &elem : f2.encrpiptedFields)
-    {
-        switch (op)
-        {
-        case Operations::ADD:
-
-            eval.add_inplace(result, elem);
-            break;
-
-        default:
-            break;
-        }
-    }
-
-    return result;
-}
-
-// This function assumes
-// The script is well formated
-// TODO: add script formating checking
-std::vector<std::vector<seal::Ciphertext>> performOperations(const std::vector<std::string> &tokens, const std::vector<File> files, const seal::Evaluator &eval, seal::Decryptor &dec) noexcept
-{
-    size_t size = tokens.size();
-
-    // Supports multiple lines and operations
-    std::vector<std::vector<seal::Ciphertext>> results;
-
-    for (size_t i = 0; i < size; ++i)
-    {
-        if (tokens[i] == "if")
-        {
-            results.emplace_back(handleCondition(files, mappingElems.at(tokens[i + 2]), operationMapping.at(tokens[i + 3]), eval));
-            i = i + 4;
-        }
-        else
-        {
-            std::vector<seal::Ciphertext> vecTrick;
-            vecTrick.emplace_back(handleOperation(f1, f2, operationMapping.at(tokens[i]), eval, dec));
-            results.emplace_back(vecTrick);
-            i = i + 1;
-        }
-    }
-
-    return results;
-}
-
-int main(int argc, const char **argv)
-{
-    if (argc < 4)
-    {
-        std::cerr << "Not enough files provided.\nUsage: File1, File2, ..., File N, algorithm.common";
-        return 1;
-    }
-
-    std::filesystem::path path1 = argv[1];
-    std::filesystem::path path2 = argv[2];
-    std::filesystem::path common = argv[3];
-
-    std::ifstream file1(path1);
-    std::ifstream file2(path2);
-    std::ifstream commonFile(common);
-
-    if (!file1.is_open())
-    {
-        std::cerr << "Cannot open file1\n";
-        return 1;
-    }
-
-    if (!file2.is_open())
-    {
-        std::cerr << "Cannot open file2\n";
-        return 1;
-    }
-
-    if (!commonFile.is_open())
-    {
-        std::cerr << "Cannot open common file\n";
-        return 1;
-    }
-
-    const auto &elems = tokenize(commonFile);
-    const auto &publicFields = indiciesToNotEncrypt(elems);
-
-    seal::EncryptionParameters params(seal::scheme_type::bfv);
-    size_t polyModulusDegree = 8192;
-
-    params.set_poly_modulus_degree(polyModulusDegree);
-    params.set_coeff_modulus(seal::CoeffModulus::BFVDefault(polyModulusDegree));
-    params.set_plain_modulus(seal::PlainModulus::Batching(polyModulusDegree, 20));
-
-    seal::SEALContext context(params);
-    seal::KeyGenerator keyGen(context);
-
-    const auto privateKey = keyGen.secret_key();
-
-    seal::RelinKeys rl;
-    seal::PublicKey pk;
-    keyGen.create_public_key(pk);
-    keyGen.create_relin_keys(rl);
-
-    seal::Encryptor encryptor(context, pk);
-    seal::Decryptor decryptor(context, privateKey);
-    seal::Evaluator evaluator(context);
-    seal::BatchEncoder encoder(context);
-
-    const auto &valuesFile1 = getFileValues(file1);
-    const auto &valuesFile2 = getFileValues(file2);
-
-    const auto &[publicFile1, encFile1] = getParameters(publicFields, valuesFile1, encryptor, decryptor);
-    const auto &[publicFile2, encFile2] = getParameters(publicFields, valuesFile2, encryptor, decryptor);
-
-    File f1{publicFile1, encFile1};
-    File f2{publicFile2, encFile2};
-
-    const auto &results = performOperations(elems, f1, f2, evaluator, decryptor);
-
-    for (const auto &resultVec : results)
-    {
-        for (const auto &result : resultVec)
-        {
-
-            seal::Plaintext plainResult;
-            decryptor.decrypt(result, plainResult);
-
-            std::print("Sum of salaries {}\n", plainResult.to_string());
-        }
-    }
-}

@@ -141,6 +141,11 @@ namespace sas
             return this->cols;
         }
 
+        size_t size() const noexcept
+        {
+            return this->data.size();
+        }
+
         T *begin()
         {
             return data.data();
@@ -159,6 +164,11 @@ namespace sas
         const T *end() const
         {
             return data.data() + data.size();
+        }
+
+        const std::vector<T> asVector() const
+        {
+            return data;
         }
 
         Matrix &operator=(const std::initializer_list<std::initializer_list<T>> other)
@@ -219,16 +229,16 @@ namespace sas
 
             return neighbors;
         }
+        ~Matrix() noexcept = default;
 
         template <typename U>
         friend std::ostream &operator<<(std::ostream &os, const Matrix<U> &p);
 
-        ~Matrix() noexcept = default;
     };
 
 
-    template <typename T>
-    std::ostream &operator<<(std::ostream &os, const Matrix<T> &p)
+    template <typename U>
+    std::ostream &operator<<(std::ostream &os, const Matrix<U> &p)
     {
         for(size_t i = 0; i < p.getRows(); ++i)
         {
