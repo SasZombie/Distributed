@@ -18,6 +18,16 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(seal)
 
-add_executable(main main.cpp)
+FetchContent_Declare(
+    Matrix
+    GIT_REPOSITORY https://github.com/SasZombie/Matrix.git
+    GIT_TAG main  
+)
+
+FetchContent_MakeAvailable(Matrix)
+
+
+add_executable(main main.cpp operations.cpp)
+target_include_directories(main PRIVATE ${matrix_SOURCE_DIR})
 
 target_link_libraries(main SEAL::seal)

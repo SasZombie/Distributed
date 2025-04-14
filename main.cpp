@@ -5,11 +5,21 @@
 #include <vector>
 #include <string>
 #include <ranges>
-
-#include "Matrix.hpp"
+#include <sstream>
 
 #include "seal/seal.h"
 #include "operations.hpp"
+
+#include "Matrix.hpp"
+
+// Structure of a file
+// If equality must be checked AND RETURNED, then we cannot encrypt the values
+struct File
+{
+    // Each matrix acts like a data frame
+    sas::Matrix<seal::Plaintext> publicFields;
+    sas::Matrix<seal::Ciphertext> encrpiptedFields;
+};
 
 static std::vector<std::string> tokenize(std::ifstream &file) noexcept
 {
@@ -46,7 +56,7 @@ static std::vector<std::string> tokenize(std::ifstream &file) noexcept
     return returned;
 }
 
-sas::Matrix<std::string> getFileValues(std::ifstream &file) noexcept
+static sas::Matrix<std::string> getFileValues(std::ifstream &file) noexcept
 {
 
     sas::Matrix<std::string> elems;
@@ -74,7 +84,7 @@ sas::Matrix<std::string> getFileValues(std::ifstream &file) noexcept
     return elems;
 }
 
-std::vector<size_t> indiciesToNotEncrypt(const std::vector<std::string> &tokens) noexcept
+static std::vector<size_t> indiciesToNotEncrypt(const std::vector<std::string> &tokens) noexcept
 {
     std::vector<size_t> result;
     size_t size = tokens.size();
@@ -89,7 +99,12 @@ std::vector<size_t> indiciesToNotEncrypt(const std::vector<std::string> &tokens)
     return result;
 }
 
-std::tuple<sas::Matrix<seal::Plaintext>, sas::Matrix<seal::Ciphertext>> getParameters(const std::vector<size_t> &publicIndicies, const sas::Matrix<std::string> &valuesFile, const seal::Encryptor &encryptor, const seal::Decryptor &dec) noexcept
+static bool isNumeric(const std::string &s) noexcept
+{
+    return !s.empty() && std::all_of(s.begin(), s.end(), ::isdigit);
+}
+
+static std::tuple<sas::Matrix<seal::Plaintext>, sas::Matrix<seal::Ciphertext>> getParameters(const std::vector<size_t> &publicIndicies, const sas::Matrix<std::string> &valuesFile, const seal::Encryptor &encryptor, const seal::BatchEncoder &encoder) noexcept
 {
 
     sas::Matrix<seal::Plaintext> publicFields;
@@ -109,19 +124,38 @@ std::tuple<sas::Matrix<seal::Plaintext>, sas::Matrix<seal::Ciphertext>> getParam
 
         for (size_t j = 0; j < cols; ++j)
         {
-            seal::Plaintext pt(valuesFile(i, j));
+
             if (indicies < maxPublic && publicIndicies[indicies] == j)
             {
+                seal::Plaintext pt(valuesFile(i, j));
                 ++indicies;
                 publicFields.pushElem(rowPublic, colPublic, pt);
                 ++colPublic;
             }
             else
             {
+                seal::Plaintext pt;
                 seal::Ciphertext cf;
-                encryptor.encrypt(pt, cf);
 
+                if (isNumeric(valuesFile(i, j)))
+                {
+                    uint64_t val = std::stoull(valuesFile(i, j));
+                    std::vector<uint64_t> vec(encoder.slot_count(), 0);
+                    vec[0] = val;
+                    encoder.encode(vec, pt);
+                }
+                else
+                {
+                    std::hash<std::string> hasher;
+                    uint64_t hashedVal = hasher(valuesFile(i, j));
+                    std::vector<uint64_t> vec(encoder.slot_count(), 0);
+                    vec[0] = hashedVal;
+                    encoder.encode(vec, pt);
+                }
+
+                encryptor.encrypt(pt, cf);
                 encFields.pushElem(rowEnc, colEnc, cf);
+
                 ++colEnc;
             }
         }
@@ -136,37 +170,33 @@ std::tuple<sas::Matrix<seal::Plaintext>, sas::Matrix<seal::Ciphertext>> getParam
     return std::make_tuple(publicFields, encFields);
 }
 
-struct File
+static std::vector<seal::Ciphertext> handleCondition(const std::vector<File> &files, auto (*predicate)(const seal::Plaintext &p1, const seal::Plaintext &p2)->bool, Operations op, const seal::Evaluator &eval) noexcept
 {
-    sas::Matrix<seal::Plaintext> publicFields;
-    sas::Matrix<seal::Ciphertext> encrpiptedFields;
-};
-
-std::vector<seal::Ciphertext> handleCondition(const std::vector<File> &files, auto (*predicate)(const seal::Plaintext &p1, const seal::Plaintext &p2)->bool, Operations op, const seal::Evaluator &eval) noexcept
-{
-    size_t filesCount = files.size();
     seal::Ciphertext result;
     std::vector<seal::Ciphertext> results;
 
     size_t candidateSize = files[0].publicFields.size();
-
-    size_t fSize = files.size();
     const auto &candidates = files[0].publicFields.asVector();
+    const size_t fileSize = files.size();
+
     std::vector<std::pair<size_t, size_t>> indicies;
 
-    for (size_t c = 0; c < candidates.size(); ++c)
+    for (size_t c = 0; c < candidateSize; ++c)
     {
         const auto &candidate = candidates[c];
         bool inAll = true;
 
-        for (size_t f = 0; f < files.size(); ++f)
+        for (size_t f = 0; f < fileSize; ++f)
         {
             const auto &matrix = files[f].publicFields;
             bool found = false;
 
-            for (size_t i = 0; i < matrix.getRows(); ++i)
+            const size_t rowSize = matrix.getRows();
+            const size_t colSize = matrix.getCols();
+
+            for (size_t i = 0; i < rowSize; ++i)
             {
-                for (size_t j = 0; j < matrix.getCols(); ++j)
+                for (size_t j = 0; j < colSize; ++j)
                 {
                     if (predicate(candidate, matrix(i, j)))
                     {
@@ -195,9 +225,8 @@ std::vector<seal::Ciphertext> handleCondition(const std::vector<File> &files, au
             {
             case Operations::ADD:
 
-                for (size_t finFile = 1; finFile < fSize; ++finFile)
+                for (size_t finFile = 1; finFile < fileSize; ++finFile)
                 {
-                    std::cout << "ADDED SOMETHINGS\n";
                     const auto &[row, col] = indicies[finFile];
                     eval.add_inplace(result, files[finFile].encrpiptedFields(row, col));
                 }
@@ -212,28 +241,29 @@ std::vector<seal::Ciphertext> handleCondition(const std::vector<File> &files, au
 
             results.push_back(result);
         }
-
-        return results;
     }
+    return results;
 }
-seal::Ciphertext handleOperation(const std::vector<File> &files, Operations op, const seal::Evaluator &eval, seal::Decryptor &dec) noexcept
+static seal::Ciphertext handleOperation(const std::vector<File> &files, Operations op, const seal::Evaluator &eval, size_t column) noexcept
 {
-    seal::Ciphertext result = files[0].encrpiptedFields(0);
+    seal::Ciphertext result = files[0].encrpiptedFields(column);
 
-    // Skip first elem
+    // Cannot Skip first elem
     for (const auto &f : files)
     {
-        for (const auto &elem : f.encrpiptedFields)
+        const size_t rowsSize = f.encrpiptedFields.getRows();
+
+        for (size_t i = 0; i < rowsSize; ++i)
         {
             switch (op)
             {
             case Operations::ADD:
+                eval.add_inplace(result, f.encrpiptedFields(i, column));
 
-                eval.add_inplace(result, elem);
                 break;
             case Operations::SUB:
-                eval.sub_inplace(result, elem);
-
+                eval.sub_inplace(result, f.encrpiptedFields(i, column));
+                break;
             default:
                 std::cerr << "Unreachable, how did we get here??\n";
                 exit(EXIT_FAILURE);
@@ -244,10 +274,10 @@ seal::Ciphertext handleOperation(const std::vector<File> &files, Operations op, 
     // Cannot init with 0 so tricks are being done
     if (op == Operations::ADD)
     {
-        eval.sub_inplace(result, files[0].encrpiptedFields(0));
+        eval.sub_inplace(result, files[0].encrpiptedFields(column));
         return result;
     }
-    eval.add_inplace(result, files[0].encrpiptedFields(0));
+    eval.add_inplace(result, files[0].encrpiptedFields(column));
 
     return result;
 }
@@ -255,13 +285,18 @@ seal::Ciphertext handleOperation(const std::vector<File> &files, Operations op, 
 // This function assumes
 // The script is well formated
 // TODO: add script formating checking
-std::vector<std::vector<seal::Ciphertext>> performOperations(const std::vector<std::string> &tokens, const std::vector<File> files, const seal::Evaluator &eval, seal::Decryptor &dec) noexcept
+static std::vector<std::vector<seal::Ciphertext>> performOperations(const std::vector<std::string> &tokens, const std::vector<File> files, const seal::Evaluator &eval) noexcept
 {
     size_t size = tokens.size();
 
     // Supports multiple lines and operations
     std::vector<std::vector<seal::Ciphertext>> results;
 
+    // There must be only 1 type of operations. For example
+    // I cannot write a script where I encode a value and then use it decoded
+    // Also I cannot have a script where I use both encoded and decoded values
+    // This can be solved if I make the script self aware of the formatting and indicies
+    // However it is outside the scope of this project
     for (size_t i = 0; i < size; ++i)
     {
         if (tokens[i] == "if")
@@ -272,7 +307,7 @@ std::vector<std::vector<seal::Ciphertext>> performOperations(const std::vector<s
         else
         {
             std::vector<seal::Ciphertext> vecTrick;
-            vecTrick.emplace_back(handleOperation(files, operationMapping.at(tokens[i]), eval, dec));
+            vecTrick.emplace_back(handleOperation(files, operationMapping.at(tokens[i]), eval, std::stoul(tokens[i + 1]) - 1));
             results.emplace_back(vecTrick);
             i = i + 1;
         }
@@ -283,41 +318,14 @@ std::vector<std::vector<seal::Ciphertext>> performOperations(const std::vector<s
 
 int main(int argc, const char **argv)
 {
+
     if (argc < 4)
     {
         std::cerr << "Not enough files provided.\nUsage: File1, File2, ..., File N, algorithm.common";
         return 1;
     }
 
-    std::filesystem::path path1 = argv[1];
-    std::filesystem::path path2 = argv[2];
-    std::filesystem::path common = argv[3];
-
-    std::ifstream file1(path1);
-    std::ifstream file2(path2);
-    std::ifstream commonFile(common);
-
-    if (!file1.is_open())
-    {
-        std::cerr << "Cannot open file1\n";
-        return 1;
-    }
-
-    if (!file2.is_open())
-    {
-        std::cerr << "Cannot open file2\n";
-        return 1;
-    }
-
-    if (!commonFile.is_open())
-    {
-        std::cerr << "Cannot open common file\n";
-        return 1;
-    }
-
-    const auto &elems = tokenize(commonFile);
-    const auto &publicFields = indiciesToNotEncrypt(elems);
-
+    // SEAL
     seal::EncryptionParameters params(seal::scheme_type::bfv);
     size_t polyModulusDegree = 8192;
 
@@ -340,28 +348,54 @@ int main(int argc, const char **argv)
     seal::Evaluator evaluator(context);
     seal::BatchEncoder encoder(context);
 
-    const auto &valuesFile1 = getFileValues(file1);
-    const auto &valuesFile2 = getFileValues(file2);
+    // SEAL
 
-    const auto &[publicFile1, encFile1] = getParameters(publicFields, valuesFile1, encryptor, decryptor);
-    const auto &[publicFile2, encFile2] = getParameters(publicFields, valuesFile2, encryptor, decryptor);
+    std::ifstream commonFile(argv[argc - 1]);
+    if (!commonFile.is_open())
+    {
+        std::cerr << "Cannot open commonFile \n";
+        return 1;
+    }
+    const auto &elems = tokenize(commonFile);
 
-    File f1{publicFile1, encFile1};
-    File f2{publicFile2, encFile2};
+    std::vector<File> files;
 
-    std::vector files = {f1, f2};
+    for (int i = 1; i < argc - 1; ++i)
+    {
+        std::cout << "File = " << argv[i] << '\n';
+        std::ifstream file(argv[i]);
+        if (!file.is_open())
+        {
 
-    const auto &results = performOperations(elems, files, evaluator, decryptor);
+            std::cerr << "Cannot open file " << i << '\n';
+
+            return 1;
+        }
+
+        const auto &publicFields = indiciesToNotEncrypt(elems);
+
+        const auto &valuesFile = getFileValues(file);
+
+        const auto &[publicFile, encFile] = getParameters(publicFields, valuesFile, encryptor, encoder);
+
+        File f{publicFile, encFile};
+        files.push_back(f);
+    }
+
+    const auto &results = performOperations(elems, files, evaluator);
 
     for (const auto &resultVec : results)
     {
+        std::print("Current operation results: \n");
         for (const auto &result : resultVec)
         {
+            seal::Plaintext decrypted_pt;
+            decryptor.decrypt(result, decrypted_pt);
 
-            seal::Plaintext plainResult;
-            decryptor.decrypt(result, plainResult);
+            std::vector<uint64_t> decoded;
+            encoder.decode(decrypted_pt, decoded);
 
-            std::print("Sum of salaries {}\n", plainResult.to_string());
+            std::cout << "Decrypted number: " << decoded[0] << "\n";
         }
     }
 }

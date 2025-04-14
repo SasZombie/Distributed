@@ -1,4 +1,4 @@
-employee_id, salary
-E001,211
-E002,122
-E003,110
+employee_id, salary, time
+E001,1,10
+E002,2,12
+E003,3,13
