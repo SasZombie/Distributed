@@ -362,7 +362,6 @@ int main(int argc, const char **argv)
 
     for (int i = 1; i < argc - 1; ++i)
     {
-        std::cout << "File = " << argv[i] << '\n';
         std::ifstream file(argv[i]);
         if (!file.is_open())
         {
@@ -389,13 +388,13 @@ int main(int argc, const char **argv)
         std::print("Current operation results: \n");
         for (const auto &result : resultVec)
         {
-            seal::Plaintext decrypted_pt;
-            decryptor.decrypt(result, decrypted_pt);
+            seal::Plaintext pt;
+            decryptor.decrypt(result, pt);
 
             std::vector<uint64_t> decoded;
-            encoder.decode(decrypted_pt, decoded);
+            encoder.decode(pt, decoded);
 
-            std::cout << "Decrypted number: " << decoded[0] << "\n";
+            std::print("\tResult = {}\n", decoded[0]);
         }
     }
 }
