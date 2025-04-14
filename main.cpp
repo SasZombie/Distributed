@@ -170,7 +170,7 @@ static std::tuple<sas::Matrix<seal::Plaintext>, sas::Matrix<seal::Ciphertext>> g
     return std::make_tuple(publicFields, encFields);
 }
 
-static std::vector<seal::Ciphertext> handleCondition(const std::vector<File> &files, auto (*predicate)(const seal::Plaintext &p1, const seal::Plaintext &p2)->bool, Operations op, const seal::Evaluator &eval) noexcept
+static std::vector<seal::Ciphertext> handleCondition(const std::vector<File> &files, auto (*predicate)(const seal::Plaintext &p1, const seal::Plaintext &p2)->bool, Operations op, size_t column, const seal::Evaluator &eval) noexcept
 {
     seal::Ciphertext result;
     std::vector<seal::Ciphertext> results;
@@ -200,7 +200,7 @@ static std::vector<seal::Ciphertext> handleCondition(const std::vector<File> &fi
                 {
                     if (predicate(candidate, matrix(i, j)))
                     {
-                        indicies.push_back({i, j});
+                        indicies.push_back({i, column});
                         found = true;
                         break;
                     }
@@ -301,7 +301,8 @@ static std::vector<std::vector<seal::Ciphertext>> performOperations(const std::v
     {
         if (tokens[i] == "if")
         {
-            results.emplace_back(handleCondition(files, mappingElems.at(tokens[i + 2]), operationMapping.at(tokens[i + 3]), eval));
+            //if 1 equals sum 2
+            results.emplace_back(handleCondition(files, mappingElems.at(tokens[i + 2]), operationMapping.at(tokens[i + 3]), std::stoul(tokens[i + 4]) - 2, eval));
             i = i + 4;
         }
         else
